@@ -1,107 +1,121 @@
-from flask import Flask, request, send_file, abort
+from flask import Flask, request, send_file, render_template_string
 import pandas as pd
 from datetime import timedelta
 import io
+import time
 
 app = Flask(__name__)
 
-def process_data(df_fuel_transaction, df_delivery_result):
-    # Keep only relevant columns and parse dates
-    df_ft = df_fuel_transaction[['TranDate', 'ทะเบียน']].copy()
-    df_ft['TranDate'] = pd.to_datetime(
-        df_ft['TranDate'], format='%d/%m/%Y', errors='coerce'
-    )
+# HTML template embedded for simplicity
+HTML = '''
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fuel Transaction Processor</title>
+  <!-- Bootstrap CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+  <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="#">Fuel Processor</a>
+    </div>
+  </nav>
+  <div class="container py-5">
+    <h2 class="mb-4">อัปโหลดไฟล์ Excel เพื่อประมวลผล</h2>
+    <form method="post" enctype="multipart/form-data">
+      <div class="mb-3">
+        <label for="transaction_file" class="form-label">ไฟล์ Fuel Transaction (.xlsx)</label>
+        <input class="form-control" type="file" name="transaction_file" id="transaction_file" accept=".xlsx" required>
+      </div>
+      <div class="mb-3">
+        <label for="delivery_file" class="form-label">ไฟล์ Delivery Result (.xlsx)</label>
+        <input class="form-control" type="file" name="delivery_file" id="delivery_file" accept=".xlsx" required>
+      </div>
+      <button type="submit" class="btn btn-primary">Process and Download</button>
+    </form>
+  </div>
+</body>
+</html>
+'''
 
-    df_dr = df_delivery_result[[
-        'ออก LDT', 'ลงสินค้า', 'พจส', 'พจส2', 'เลขรถ', 'หัว', 'LDT'
-    ]].copy()
-    df_dr['ออก LDT'] = pd.to_datetime(
-        df_dr['ออก LDT'], format='%d/%m/%Y', errors='coerce'
-    )
-    df_dr['LDT'] = df_dr['LDT'].astype(str)
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        # รับไฟล์จากฟอร์ม
+        f1 = request.files.get('transaction_file')
+        f2 = request.files.get('delivery_file')
+        if not f1 or f1.filename == '' or not f2 or f2.filename == '':
+            return render_template_string(HTML + '<div class="container text-danger">กรุณาอัปโหลดไฟล์ทั้งสองให้ครบ!</div>')
 
-    # Initialize new columns
-    df_ft['พจส']    = None
-    df_ft['LDT']    = None
-    df_ft['Medthod']= None
+        # อ่าน DataFrame
+        df_fuel = pd.read_excel(f1, sheet_name="รถมีนา")
+        df_fuel = df_fuel[['TranDate', 'ทะเบียน']]
+        df_fuel['TranDate'] = pd.to_datetime(df_fuel['TranDate'], format='%d/%m/%Y', errors='coerce')
 
-    def update_df(val_a, val_c, method, condition):
-        if pd.isna(val_a) or pd.isna(val_c):
-            return
-        if condition == 'exact':
-            df_f = df_dr[
-                (df_dr['ออก LDT'] == val_a) &
-                (df_dr['หัว']      == val_c)
-            ]
-        elif condition == 'next_day':
-            df_f = df_dr[
-                (df_dr['ออก LDT'] == val_a + timedelta(days=1)) &
-                (df_dr['หัว']      == val_c)
-            ]
-        elif condition == 'on_or_before':
-            df_f = df_dr[
-                (df_dr['ออก LDT'] < val_a + timedelta(days=1)) &
-                (df_dr['หัว']      == val_c)
-            ]
-        else:
-            return
+        df_dr = pd.read_excel(f2, skiprows=1)
+        df_dr = df_dr[['ออก LDT', 'ลงสินค้า', 'พจส', 'พจส2', 'เลขรถ', 'หัว', 'LDT']]
+        df_dr['ออก LDT'] = pd.to_datetime(df_dr['ออก LDT'], format='%d/%m/%Y', errors='coerce')
+        df_dr['LDT'] = df_dr['LDT'].astype(str)
 
-        if not df_f.empty:
-            names = df_f['พจส'].unique()
-            ldts  = df_f['LDT'].unique()
-            joined_ldt = ', '.join(ldts)
-            mask = (
-                (df_ft['TranDate'] == val_a) &
-                (df_ft['ทะเบียน']   == val_c)
-            )
-            if len(names) == 1:
-                df_ft.loc[mask, 'พจส']    = names[0]
-                df_ft.loc[mask, 'LDT']    = joined_ldt
-                df_ft.loc[mask, 'Medthod']= method
-            else:
-                df_ft.loc[mask, 'พจส']    = ', '.join(names)
-                df_ft.loc[mask, 'LDT']    = joined_ldt
-                df_ft.loc[mask, 'Medthod']= 'มีชื่อมากกว่า 1 ในวันเดียว'
+        # สร้างคอลัมน์ใหม่
+        df_fuel['พจส'] = None
+        df_fuel['LDT'] = None
+        df_fuel['Medthod'] = None
 
-    # Apply per-row
-    for dt, reg in zip(df_ft['TranDate'], df_ft['ทะเบียน']):
-        update_df(dt, reg, 'TranDate=ออกLDT',  'exact')
-        update_df(dt, reg, 'เพิ่มวัน',        'next_day')
-        update_df(dt, reg, 'นับวันย้อนหลัง', 'on_or_before')
+        # ฟังก์ชันอัปเดตข้อมูลตามเงื่อนไข
+        def update_df(val_a, val_c, method, condition):
+            if condition == 'exact':
+                filt = (df_dr['ออก LDT'] == val_a) & (df_dr['หัว'] == val_c)
+            elif condition == 'next_day':
+                filt = (df_dr['ออก LDT'] == val_a + timedelta(days=1)) & (df_dr['หัว'] == val_c)
+            else:  # on_or_before
+                filt = (df_dr['ออก LDT'] < val_a + timedelta(days=1)) & (df_dr['หัว'] == val_c)
 
-    # Truncate LDT to first comma when single record
-    df_ft['LDT'] = df_ft['LDT'].astype(str)
-    mask    = df_ft['Medthod'] != 'มีชื่อมากกว่า 1 ในวันเดียว'
-    df_ft.loc[mask, 'LDT'] = (
-        df_ft.loc[mask, 'LDT']
-             .str.partition(',')[0]
-             .str.strip()
-    )
-    return df_ft
+            df_filtered = df_dr[filt]
+            if not df_filtered.empty:
+                names = df_filtered['พจส'].unique()
+                ldts = df_filtered['LDT'].unique()
+                joined_ldt = ', '.join(ldts)
 
-@app.route('/process', methods=['POST'])
-def process_files():
-    # Require both files
-    if 'transaction_file' not in request.files or 'delivery_file' not in request.files:
-        abort(400, 'transaction_file and delivery_file are required')
+                idx = (df_fuel['TranDate'] == val_a) & (df_fuel['ทะเบียน'] == val_c)
+                if len(names) == 1:
+                    df_fuel.loc[idx, 'พจส'] = names[0]
+                    df_fuel.loc[idx, 'LDT'] = joined_ldt
+                    df_fuel.loc[idx, 'Medthod'] = method
+                else:
+                    df_fuel.loc[idx, 'พจส'] = ', '.join(names)
+                    df_fuel.loc[idx, 'LDT'] = joined_ldt
+                    df_fuel.loc[idx, 'Medthod'] = 'มีชื่อมากกว่า 1 ในวันเดียว'
 
-    try:
-        df_trans = pd.read_excel(request.files['transaction_file'], sheet_name='รถมีนา')
-        df_deliv = pd.read_excel(request.files['delivery_file'], skiprows=1)
-    except Exception as e:
-        abort(400, f'Error reading Excel files: {e}')
+        # ประมวลผลแต่ละแถว
+        for a, c in zip(df_fuel['TranDate'], df_fuel['ทะเบียน']):
+            update_df(a, c, 'TranDate=ออกLDT', 'exact')
+            update_df(a, c, 'เพิ่มวัน', 'next_day')
+            update_df(a, c, 'นับวันย้อนหลัง', 'on_or_before')
 
-    result_df = process_data(df_trans, df_deliv)
+        # ตัดค่าหลัง comma ถ้าไม่ใช่กรณีมีชื่อมากกว่า 1
+        df_fuel['LDT'] = df_fuel['LDT'].astype(str)
+        mask = df_fuel['Medthod'] != 'มีชื่อมากกว่า 1 ในวันเดียว'
+        df_fuel.loc[mask, 'LDT'] = df_fuel.loc[mask, 'LDT'].str.partition(',')[0].str.strip()
 
-    # Return in-memory Excel
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        result_df.to_excel(writer, index=False)
-    buf.seek(0)
+        # ส่งไฟล์กลับเป็น Excel
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_fuel.to_excel(writer, index=False)
+        output.seek(0)
+        filename = f"result_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
 
-    return send_file(
-        buf,
-        as_attachment=True,
-        download_name='result.xlsx',
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
+    # GET
+    return render_template_string(HTML)
+
+if __name__ == '__main__':
+    app.run(debug=True)
