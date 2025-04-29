@@ -1,15 +1,14 @@
 {
     "version": 2,
-    "builds": [
-      {
-        "src": "Dockerfile",
-        "use": "@vercel/docker"
+    "functions": {
+      "api/**/*.py": {
+        "runtime": "python3.12"
       }
-    ],
+    },
     "routes": [
       {
-        "src": "/(.*)",
-        "dest": "/"
+        "src": "/process",
+        "dest": "api/process.py"
       }
     ]
   }
